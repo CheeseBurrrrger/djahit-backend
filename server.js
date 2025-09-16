@@ -23,6 +23,31 @@ const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
 
 const PORT = process.env.PORT || 5555;
 
+const getJakartaTime = () => {
+  return new Date().toLocaleString('sv-SE', {
+    timeZone: 'Asia/Jakarta'
+  });
+};
+
+const getJakartaTimeISO = () => {
+  return new Date().toLocaleString('en-CA', {
+    timeZone: 'Asia/Jakarta',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).replace(', ', 'T') + '+07:00';
+};
+const originalQuery = pool.query.bind(pool);
+pool.query = function(text, params, callback) {
+  if (typeof text === 'string') {
+    text = text.replace(/NOW\(\)/g, `'${getJakartaTime()}'`);
+  }
+  return originalQuery(text, params, callback);
+};
 // ============= MIDDLEWARE =============
 
 // JWT Authentication Middleware
@@ -183,7 +208,7 @@ app.get('/api/health', (req, res) => {
     success: true,
     data: {
       status: 'healthy',
-      timestamp: new Date().toISOString(),
+      timestamp: getJakartaTimeISO(),
       version: '1.0.0'
     }
   });
