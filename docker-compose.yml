@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: djahit-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: djahit
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: djahitontop
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - djahit-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d djahit"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Node.js API
+  api:
+    build: .
+    container_name: djahit-api
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 5551  
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_DATABASE: djahit 
+      DB_USER: postgres
+      DB_PASSWORD: djahitontop
+      JWT_SECRET: your-super-secret-jwt-key-change-this-to-something-long-and-random
+      BCRYPT_ROUNDS: 12
+    ports:
+      - "5551:5551"
+    networks:
+      - djahit-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+    
+  # Nginx (Optional - for production)
+  nginx:
+    image: nginx:alpine
+    container_name: djahit-nginx
+    restart: unless-stopped
+    ports:
+      - "8880:8880"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+      - nginx_logs:/var/log/nginx  # Add this for log persistence
+
+    depends_on:
+      - api
+    networks:
+      - djahit-network
+
+volumes:
+  postgres_data:
+    driver: local
+  nginx_logs: 
+    driver: local
+
+
+networks:
+  djahit-network:
+    driver: bridge
