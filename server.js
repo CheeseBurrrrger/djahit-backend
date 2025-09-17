@@ -380,8 +380,6 @@ app.post('/api/auth/register', async (req, res) => {
 
     const newUser = result.rows[0];
 
-    generateTokens
-
     res.status(201).json({
       success: true,
       data: {
@@ -392,11 +390,9 @@ app.post('/api/auth/register', async (req, res) => {
           email: newUser.email,
           phone: newUser.phone,
           createdAt: newUser.created_at
-        },
-        token,
-        tokenType: 'Bearer'
+        }
       },
-      message: 'User registered successfully'
+      message: 'User registered successfully, please continue to log in'
     });
 
   } catch (error) {
@@ -458,7 +454,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     // Generate JWT token
-    generateTokens
+    const tokens = generateTokens(user);
 
 
     res.json({
@@ -471,7 +467,8 @@ app.post('/api/auth/login', async (req, res) => {
           email: user.email,
           phone: user.phone
         },
-        token,
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
         tokenType: 'Bearer'
       },
       message: 'Login successful'
