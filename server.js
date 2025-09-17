@@ -5,22 +5,97 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const rateLimit = require("express-rate-limit");
 const { body, param, query, validationResult } = require('express-validator');
+const helmet = require("helmet");
+const compression = require("compression");
+const cors = require("cors");
+const xss = require('xss');
+const morgan = require('morgan');
+
 
 
 // Middleware
-app.use(express.json());
-app.use(express.urlencoded({ extended: false }));
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", "data:", "https:"],
+    },
+  },
+  hsts: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true
+  }
+}));
 
-// Rate limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100 // limit each IP to 100 requests per windowMs
-});
-app.use('/api/', limiter);
+app.use(compression());
 
-// JWT Secret (should be in environment variables)
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+// CORS configuration for production
+app.use(cors({
+  origin: process.env.NODE_ENV === 'production' 
+    ? ['https://yourdomain.com', 'https://api.yourdomain.com'] 
+    : ['http://localhost:3000', 'http://localhost:8080', 'http://localhost:8880'],
+  credentials: true,
+  optionsSuccessStatus: 200
+}));
+if (process.env.NODE_ENV === 'production') {
+  app.use(morgan('combined')); // Standard Apache log format
+} else {
+  app.use(morgan('dev')); // Colorful dev format
+}
+// Trust proxy settings
+app.set('trust proxy', ['loopback', 'linklocal', 'uniquelocal']);
 
+// THEN your existing middleware:
+app.use(express.json({ limit: '10mb' })); // Add size limit
+app.use(express.urlencoded({ extended: false, limit: '10mb' }));
+
+if (process.env.NODE_ENV === 'production') {
+  // Force HTTPS
+  app.use((req, res, next) => {
+    if (req.header('x-forwarded-proto') !== 'https') {
+      return res.redirect(`https://${req.header('host')}${req.url}`);
+    }
+    next();
+  });
+
+  // Additional security headers
+  app.use((req, res, next) => {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-XSS-Protection', '1; mode=block');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+  });
+
+  // Stricter rate limiting for production
+  const productionLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 50, // Reduced from 100
+    message: {
+      success: false,
+      error: {
+        code: 'RATE_LIMIT_EXCEEDED',
+        message: 'Too many requests. Please try again later.'
+      }
+    }
+  });
+  app.use('/api/', productionLimiter);
+}
+const JWT_SECRET = process.env.JWT_SECRET;
+
+if (!JWT_SECRET) {
+  console.error('FATAL: JWT_SECRET environment variable is required');
+  process.exit(1);
+}
+
+if (JWT_SECRET.length < 32) {
+  console.error('FATAL: JWT_SECRET must be at least 32 characters long');
+  process.exit(1);
+}
 const PORT = process.env.PORT || 5555;
 
 const getJakartaTime = () => {
@@ -78,6 +153,21 @@ const authenticateToken = (req, res, next) => {
     req.user = user;
     next();
   });
+};
+const generateTokens = (user) => {
+  const accessToken = jwt.sign(
+    { id: user.id, email: user.email },
+    JWT_SECRET,
+    { expiresIn: process.env.NODE_ENV === 'production' ? '15m' : '1h' }
+  );
+  
+  const refreshToken = jwt.sign(
+    { id: user.id, email: user.email, type: 'refresh' },
+    JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+  
+  return { accessToken, refreshToken };
 };
 const validateRepairRequestCreate = [
   body('original_img_url')
@@ -190,12 +280,22 @@ const checkValidation = (req, res, next) => {
 
 // Error handling middleware
 const errorHandler = (err, req, res, next) => {
-  console.error(err.stack);
+  console.error('Server Error:', {
+    error: err.message,
+    stack: process.env.NODE_ENV === 'development' ? err.stack : 'Hidden in production',
+    url: req.originalUrl,
+    method: req.method,
+    ip: req.ip,
+    timestamp: new Date().getJakartaTimeISO()
+  });
+  const isDevelopment = process.env.NODE_ENV === 'development';
+  
   res.status(500).json({
     success: false,
     error: {
       code: 'INTERNAL_SERVER_ERROR',
-      message: 'Something went wrong!'
+      message: isDevelopment ? err.message : 'An internal server error occurred',
+      ...(isDevelopment && { stack: err.stack })
     }
   });
 };
@@ -219,7 +319,11 @@ app.get('/api/health', (req, res) => {
 // POST /api/auth/register - Register a new user
 app.post('/api/auth/register', async (req, res) => {
   try {
-    const { firstname, lastname, email, password, phone } = req.body;
+    const firstname = xss(req.body.firstname?.trim());
+    const lastname = xss(req.body.lastname?.trim());
+    const email = xss(req.body.email?.toLowerCase().trim());
+    const password = req.body.password; 
+    const phone = xss(req.body.phone?.trim());
 
     // Validation
     if (!firstname || !lastname || !email || !password || !phone) {
@@ -276,15 +380,7 @@ app.post('/api/auth/register', async (req, res) => {
 
     const newUser = result.rows[0];
 
-    // Generate JWT token
-    const token = jwt.sign(
-      { 
-        id: newUser.id, 
-        email: newUser.email 
-      },
-      JWT_SECRET,
-      { expiresIn: '24h' }
-    );
+    generateTokens
 
     res.status(201).json({
       success: true,
@@ -362,14 +458,8 @@ app.post('/api/auth/login', async (req, res) => {
     }
 
     // Generate JWT token
-    const token = jwt.sign(
-      { 
-        id: user.id, 
-        email: user.email 
-      },
-      JWT_SECRET,
-      { expiresIn: '24h' }
-    );
+    generateTokens
+
 
     res.json({
       success: true,
@@ -1004,6 +1094,61 @@ app.delete('/api/repair-requests/:id',
     }
   }
 );
+app.post('/api/auth/refresh', async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+    
+    if (!refreshToken) {
+      return res.status(401).json({
+        success: false,
+        error: {
+          code: 'UNAUTHORIZED',
+          message: 'Refresh token is required'
+        }
+      });
+    }
+
+    const decoded = jwt.verify(refreshToken, JWT_SECRET);
+    
+    if (decoded.type !== 'refresh') {
+      return res.status(401).json({
+        success: false,
+        error: {
+          code: 'UNAUTHORIZED',
+          message: 'Invalid token type'
+        }
+      });
+    }
+
+    const user = await pool.query('SELECT id, email FROM users WHERE id = $1', [decoded.id]);
+    
+    if (user.rows.length === 0) {
+      return res.status(401).json({
+        success: false,
+        error: {
+          code: 'UNAUTHORIZED',
+          message: 'User not found'
+        }
+      });
+    }
+
+    const tokens = generateTokens(user.rows[0]);
+    
+    res.json({
+      success: true,
+      data: tokens
+    });
+
+  } catch (error) {
+    res.status(401).json({
+      success: false,
+      error: {
+        code: 'UNAUTHORIZED',
+        message: 'Invalid refresh token'
+      }
+    });
+  }
+});
 // ============= ERROR HANDLING =============
 
 // 404 handler
